@@ -6,69 +6,54 @@ struct WhittedIntegrator{C<: Camera, S <: AbstractSampler} <: SamplerIntegrator
     max_depth::Int64
 end
 
-function sample_kernel_inner(i::A, scene::B, t_sampler::C, film::D, film_tile::E, camera::F, pixel::G, spp_sqr::H) where {A, B, C, D, E, F, G, H}
-    while has_next_sample(t_sampler)
+function sample_pixel(i::A, scene::B, t_sampler::C, camera::F, pixel::G, spp_sqr::H) where {A, B, C, F, G, H}
+    l = RGBSpectrum(0f0)
+    for _ in 1:t_sampler.samples_per_pixel
         camera_sample = get_camera_sample(t_sampler, pixel)
         ray, ω = generate_ray_differential(camera, camera_sample)
         ray = scale_differentials(ray, spp_sqr)
-        l = RGBSpectrum(0f0)
         if ω > 0.0f0
             l = li(i, ray, scene, 1)
         end
-        # TODO check l for invalid values
-        if isnan(l)
-            l = RGBSpectrum(0f0)
+    end
+    return isnan(l) ? RGBSpectrum(0f0) : l
+end
+
+@noinline function sample_kernel(i::A, camera::B, scene::C, film::D, film_tile::E, tile_bounds::F)
+    t_sampler = i.sampler
+    spp_sqr = 1f0 / √Float32(t_sampler.samples_per_pixel)
+    f_xyz = film.pixels.xyz
+    for pixel in tile_bounds
+        l = sample_pixel(i, scene, t_sampler, film, film_tile, camera, pixel, spp_sqr)
+        idx = get_pixel_index(film, pixel)
+        if checkbounds(Bool, f_xyz, idx)
+            f_xyz[idx] += to_XYZ(l)
         end
-        add_sample!(film, film_tile, camera_sample.film, l, ω)
-        start_next_sample!(t_sampler)
     end
 end
 
-@noinline function sample_kernel(i, camera, scene, film, film_tile, tile_bounds)
-    t_sampler = deepcopy(i.sampler)
-    spp_sqr = 1f0 / √Float32(t_sampler.samples_per_pixel)
-    for pixel in tile_bounds
-        start_pixel!(t_sampler, pixel)
-        sample_kernel_inner(i, scene, t_sampler, film, film_tile, camera, pixel, spp_sqr)
+
+function sampling_kernel(i::A, scene::B, sampler::C, camera::D, f_xyz::E, spp_sqr::F) where {A, B, C, D, E, F}
+    Threads.@threads for idx in CartesianIndices(size(f_xyz))
+        pixel = Point2f(Tuple(idx))
+        l = sample_pixel(i, scene, sampler, camera, pixel, spp_sqr)
+        f_xyz[idx] += to_XYZ(l)
     end
-    merge_film_tile!(film, film_tile)
 end
 
 """
 Render scene.
 """
-function (i::SamplerIntegrator)(scene::Scene)
-    sample_bounds = get_sample_bounds(get_film(i.camera))
-    sample_extent = diagonal(sample_bounds)
-    tile_size = 16
-    n_tiles = Int64.(floor.((sample_extent .+ tile_size) ./ tile_size))
+function (i::SamplerIntegrator)(scene::Scene, film::Film)
     # TODO visualize tile bounds to see if they overlap
-    width, height = n_tiles
-    total_tiles = width * height - 1
-    bar = Progress(total_tiles, 1)
-    @info "Utilizing $(Threads.nthreads()) threads"
     film = get_film(i.camera)
+    f_xyz = film.pixels.xyz
+    bar = Progress(length(f_xyz), 1)
+    @info "Utilizing $(Threads.nthreads()) threads"
     camera = i.camera
-    filter_radius = film.filter.radius
-
-    _tile = Point2f(0f0)
-    _tb_min = sample_bounds.p_min .+ _tile .* tile_size
-    _tb_max = min.(_tb_min .+ (tile_size - 1), sample_bounds.p_max)
-    _tile_bounds = Bounds2(_tb_min, _tb_max)
-    filmtiles = [FilmTile(film, _tile_bounds, filter_radius) for _ in 1:Threads.maxthreadid()]
-    Threads.@threads :greedy for k in 0:total_tiles
-        x, y = k % width, k ÷ width
-        tile = Point2f(x, y)
-        tb_min = sample_bounds.p_min .+ tile .* tile_size
-        tb_max = min.(tb_min .+ (tile_size - 1), sample_bounds.p_max)
-        if tb_min[1] < tb_max[1] && tb_min[2] < tb_max[2]
-            tile_bounds = Bounds2(tb_min, tb_max)
-            film_tile = filmtiles[Threads.threadid()]
-            film_tile = update_bounds!(film, film_tile, tile_bounds)
-            sample_kernel(i, camera, scene, film, film_tile, tile_bounds)
-        end
-        next!(bar)
-    end
+    sampler = i.sampler
+    spp_sqr = 1.0f0 / √Float32(sampler.samples_per_pixel)
+    sampling_kernel(i, scene, sampler, camera, f_xyz, spp_sqr)
     save(film)
 end
 

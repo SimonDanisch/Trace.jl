@@ -60,7 +60,7 @@ begin
         Trace.PointLight(Vec3f(0, 3, 3), Trace.RGBSpectrum(15.0f0)),
     ]
     scene = Trace.Scene(lights, bvh);
-    resolution = Point2f(10)
+    resolution = Point2f(1024)
     f = Trace.LanczosSincFilter(Point2f(1.0f0), 3.0f0)
     film = Trace.Film(resolution,
         Trace.Bounds2(Point2f(0.0f0), Point2f(1.0f0)),
@@ -72,15 +72,15 @@ begin
         Trace.look_at(Point3f(0, 4, 2), Point3f(0, -4, -1), Vec3f(0, 0, 1)),
         screen_window, 0.0f0, 1.0f0, 0.0f0, 1.0f6, 45.0f0, film,
     )
-
 end
 begin
     integrator = Trace.WhittedIntegrator(cam, Trace.UniformSampler(8), 1)
     @time integrator(scene)
-    img = reverse(film.framebuffer, dims=1)
+    rotl90(film.framebuffer)
 end
 # begin
 #     integrator = Trace.SPPMIntegrator(cam, 0.075f0, 5, 100)
 #     integrator(scene)
 #     img = reverse(film.framebuffer, dims=1)
 # end
+rotl90(film.framebuffer)

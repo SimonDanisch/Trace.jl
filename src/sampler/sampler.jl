@@ -109,7 +109,6 @@ function get_2d_array(sampler::Sampler, n::Integer)
     arr
 end
 
-
 mutable struct PixelSampler <: AbstractSampler
     sampler::Sampler
     samples_1d::Vector{Vector{Float32}}
@@ -155,29 +154,12 @@ function get_2d(ps::PixelSampler)::Point2f
 end
 
 
-mutable struct UniformSampler <: AbstractSampler
-    current_sample::Int64
+struct UniformSampler <: AbstractSampler
     samples_per_pixel::Int64
-    UniformSampler(samples_per_pixel::Integer) = new(1, samples_per_pixel)
 end
 
-function get_camera_sample(::UniformSampler, p_raster::Point2f)
-    @inbounds rng = TRNG[Threads.threadid()]
-    p_film = p_raster .+ rand(rng, Point2f)
-    p_lens = rand(rng, Point2f)
-    CameraSample(p_film, p_lens, rand(rng, Float32))
-end
 
-@inline function has_next_sample(u::UniformSampler)::Bool
-    u.current_sample ≤ u.samples_per_pixel
-end
-@inline function start_next_sample!(u::UniformSampler)
-    u.current_sample += 1
-end
-@inline function start_pixel!(u::UniformSampler, ::Point2f)
-    u.current_sample = 1
-end
-@inline get_1d(u::UniformSampler)::Float32 = rand(Float32)
-@inline get_2d(u::UniformSampler)::Point2f = rand(Point2f)
+@inline get_1d(::UniformSampler)::Float32 = rand(Float32)
+@inline get_2d(::UniformSampler)::Point2f = rand(Point2f)
 
 # include("stratified.jl")
