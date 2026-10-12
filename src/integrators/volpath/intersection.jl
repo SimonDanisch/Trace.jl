@@ -2,37 +2,20 @@
 # Handles ray-scene intersection and classifies results into work queues
 
 """
-    resolve_mi_idx(accel, inst_slot, primitive) -> UInt32
+    resolve_mi_idx(instance_id, primitive) -> UInt32
 
-Pick the medium_interface_idx for a hit.  `inst_slot` is the 5th value
-returned by `Raycore.closest_hit` / `Raycore.any_hit`; its meaning
-depends on the accelerator type:
+Pick the medium_interface_idx for a hit. `instance_id` is the 5th value
+`Raycore.closest_hit` / `Raycore.any_hit` return, the instance's custom index,
+on every acceleration structure: `Raycore.TLAS` and the hardware ones alike
+(`gl_InstanceCustomIndexEXT` on Vulkan, `user_instance_id` on Metal, in the
+ray-tracing pipeline `rt_instance_custom_index()`).
 
-- `StaticTLAS` (software traversal): 1-based instance array index.  The
-  override is `accel.instances[inst_slot].instance_id`.
-- Hardware-adapted accelerators (`AdaptedAccel`): the override value
-  itself, forwarded straight from `gl_InstanceCustomIndexEXT` via the
-  inline ray query's `lava_ray_query_get_instance_custom_index`.
-
-Either way, a nonzero override replaces the triangle's per-face
-`medium_interface_idx`; zero means "inherit".  This is the single place
-where the per-instance interface override resolves.
+A nonzero index replaces the triangle's per-face `medium_interface_idx`; zero
+means "inherit". This is the single place where the per-instance interface
+override resolves.
 """
-@inline function resolve_mi_idx(accel::Raycore.StaticTLAS, inst_idx::UInt32, primitive)
-    if inst_idx != UInt32(0)
-        @inbounds override = accel.instances[inst_idx].instance_id
-        if override != UInt32(0)
-            return override
-        end
-    end
-    return primitive.metadata.medium_interface_idx
-end
-
-# Hardware-adapted accelerators: the 5th closest_hit return is already the
-# resolved override (carried through `gl_InstanceCustomIndexEXT`), so no
-# `.instances` lookup is needed.
-@inline function resolve_mi_idx(::Any, override::UInt32, primitive)
-    override != UInt32(0) ? override : primitive.metadata.medium_interface_idx
+@inline function resolve_mi_idx(instance_id::UInt32, primitive)
+    instance_id != UInt32(0) ? instance_id : primitive.metadata.medium_interface_idx
 end
 
 # ============================================================================
@@ -331,10 +314,10 @@ end
     camera = @inbounds camera_ref[Int32(1)]
     # ─── Medium ray: trace and defer all shading to the medium pipeline ───
     if has_medium(work.medium_idx)
-        hit, primitive, t_hit, barycentric, inst_idx = Raycore.closest_hit(accel, work.ray)
+        hit, primitive, t_hit, barycentric, instance_id = Raycore.closest_hit(accel, work.ray)
 
         if hit
-            mi_idx = resolve_mi_idx(accel, inst_idx, primitive)
+            mi_idx = resolve_mi_idx(instance_id, primitive)
             mi = media_interfaces[mi_idx]
             mat_idx = mi.material
 
@@ -367,14 +350,14 @@ end
     # ─── Non-medium: trace + alpha-test + inline shade ───
     ray = work.ray
     for _ in 1:Int32(16)
-        hit, primitive, t_hit, barycentric, inst_idx = Raycore.closest_hit(accel, ray)
+        hit, primitive, t_hit, barycentric, instance_id = Raycore.closest_hit(accel, ray)
 
         if !hit
             push!(escaped_queue, VPEscapedRayWorkItem(work))
             return
         end
 
-        mi_idx = resolve_mi_idx(accel, inst_idx, primitive)
+        mi_idx = resolve_mi_idx(instance_id, primitive)
         mi = media_interfaces[mi_idx]
         mat_idx = mi.material
 
@@ -513,7 +496,7 @@ while opaque surfaces block it. The final contribution is computed as:
         end
 
         ray = Raycore.Ray(o=ray_o, d=dir, t_max=t_remaining)
-        hit, primitive, t_hit, barycentric, inst_idx = Raycore.closest_hit(accel, ray)
+        hit, primitive, t_hit, barycentric, instance_id = Raycore.closest_hit(accel, ray)
 
         if !hit
             # No more surfaces - compute transmittance for remaining distance
@@ -530,7 +513,7 @@ while opaque surfaces block it. The final contribution is computed as:
         end
 
         # Hit a surface - look up MediumInterfaceIdx (per-instance override takes priority)
-        mi_idx = resolve_mi_idx(accel, inst_idx, primitive)
+        mi_idx = resolve_mi_idx(instance_id, primitive)
         mi = @inbounds media_interfaces[mi_idx]
         n = vp_compute_geometric_normal(primitive)
         entering = dot(dir, n) < 0f0
@@ -910,13 +893,13 @@ which medium the camera is inside. Writes a SetKey to result[1].
 
     for _ in 1:Int32(16)
         if !found
-            hit, primitive, t_hit, barycentric, inst_idx = Raycore.closest_hit(accel, ray)
+            hit, primitive, t_hit, barycentric, instance_id = Raycore.closest_hit(accel, ray)
 
             if !hit
                 result[1] = SetKey()
                 found = true
             else
-                mi_idx = resolve_mi_idx(accel, inst_idx, primitive)
+                mi_idx = resolve_mi_idx(instance_id, primitive)
                 mi = media_interfaces[mi_idx]
 
                 if is_medium_transition(mi)

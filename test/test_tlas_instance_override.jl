@@ -96,25 +96,23 @@ _channel_maxes(img) = (
     end
 
     # ── 2. closest_hit forwards the override ────────────────────────────────
-    @testset "closest_hit returns 1-based instance array index" begin
+    @testset "closest_hit returns the instance's custom index" begin
         cube = _cube_mesh()
         tlas = Raycore.TLAS(CPU())
-        h1 = push!(tlas, cube)                             # idx 1, override 0
-        h2 = push!(tlas, cube, _shift_mat(2,0); instance_id=UInt32(99))  # idx 2, override 99
+        h1 = push!(tlas, cube)                             # override 0
+        h2 = push!(tlas, cube, _shift_mat(2,0); instance_id=UInt32(99))  # override 99
         Raycore.sync!(tlas)
         static = Adapt.adapt(CPU(), tlas)
 
         ray1 = Raycore.Ray(Raycore.Point3f(0, 0, 2), Raycore.Vec3f(0, 0, -1), 0f0, 100f0, 0f0)
-        hit, _, _, _, idx1 = Raycore.closest_hit(static, ray1)
+        hit, _, _, _, id1 = Raycore.closest_hit(static, ray1)
         @test hit
-        @test idx1 == UInt32(1)
-        @test static.instances[idx1].instance_id == UInt32(0)  # inherit
+        @test id1 == UInt32(0)  # inherit
 
         ray2 = Raycore.Ray(Raycore.Point3f(2, 0, 2), Raycore.Vec3f(0, 0, -1), 0f0, 100f0, 0f0)
-        hit, _, _, _, idx2 = Raycore.closest_hit(static, ray2)
+        hit, _, _, _, id2 = Raycore.closest_hit(static, ray2)
         @test hit
-        @test idx2 == UInt32(2)
-        @test static.instances[idx2].instance_id == UInt32(99)
+        @test id2 == UInt32(99)
     end
 
     # ── 3. Meshscatter-style push! builds 1 BLAS + N instances ──────────────
@@ -300,14 +298,14 @@ _channel_maxes(img) = (
         # All instances have instance_id == 0 → fallback path taken
         @test all(d.instance_id == UInt32(0) for d in Array(scene.accel.instances))
 
-        # Trace a ray directly against the CPU TLAS — returns idx.
-        # accel.instances[idx].instance_id is 0, so resolve_mi_idx falls
-        # through to `tri.metadata.medium_interface_idx`.
+        # Trace a ray directly against the CPU TLAS: the hit's custom index is
+        # 0, so resolve_mi_idx falls through to `tri.metadata.medium_interface_idx`.
         static = Adapt.adapt(CPU(), scene.accel)
         ray = Raycore.Ray(Raycore.Point3f(0, 0, 3), Raycore.Vec3f(0, 0, -1), 0f0, 100f0, 0f0)
-        hit, tri, _, _, idx = Raycore.closest_hit(static, ray)
+        hit, tri, _, _, id = Raycore.closest_hit(static, ray)
         @test hit
-        @test static.instances[idx].instance_id == UInt32(0)
+        @test id == UInt32(0)
         @test tri.metadata.medium_interface_idx != UInt32(0)   # triangle carries material
+        @test Hikari.resolve_mi_idx(id, tri) == tri.metadata.medium_interface_idx
     end
 end

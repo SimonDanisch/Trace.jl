@@ -124,7 +124,7 @@ end
 
     # ─── Medium branch: same routing as `vp_trace_and_shade_kernel!`'s top ───
     if has_medium(work.medium_idx)
-        mi_idx = resolve_mi_idx(accel, inst_custom_idx, primitive)
+        mi_idx = resolve_mi_idx(inst_custom_idx, primitive)
         mi = media_interfaces[mi_idx]
         mat_idx = mi.material
 
@@ -159,7 +159,7 @@ end
     # implementation does NOT have an anyhit; scenes with alpha textures
     # will treat them as opaque under HW RT.  Add anyhit as a follow-up
     # when the basic chit-shading variant is shown to win.
-    mi_idx = resolve_mi_idx(accel, inst_custom_idx, primitive)
+    mi_idx = resolve_mi_idx(inst_custom_idx, primitive)
     mi = media_interfaces[mi_idx]
     mat_idx = mi.material
 
@@ -356,7 +356,7 @@ struct VPClosesthitTyped{T} end
 
     # Medium branch — defer to compute kernel that drains medium_sample_queue.
     if has_medium(work.medium_idx)
-        mi_idx = resolve_mi_idx(accel, inst_custom_idx, primitive)
+        mi_idx = resolve_mi_idx(inst_custom_idx, primitive)
         mi = media_interfaces[mi_idx]
         mat_idx = mi.material
 
@@ -383,7 +383,7 @@ struct VPClosesthitTyped{T} end
     end
 
     # Non-medium surface hit
-    mi_idx = resolve_mi_idx(accel, inst_custom_idx, primitive)
+    mi_idx = resolve_mi_idx(inst_custom_idx, primitive)
     mi = media_interfaces[mi_idx]
     mat_idx = mi.material
 

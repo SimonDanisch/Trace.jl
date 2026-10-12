@@ -398,67 +398,19 @@ end
 # Accelerator intersection
 # ============================================================================
 
-# Intersect StaticTLAS - returns hit info, primitive, and SurfaceInteraction
-# The primitive (triangle) contains material_type and material_idx for dispatch
-# Note: Only StaticTLAS is used in kernels (adapt converts TLAS → StaticTLAS)
-@propagate_inbounds function intersect!(accel::Raycore.StaticTLAS, ray::AbstractRay)
-    hit_found, triangle, distance, bary_coords, inst_idx = closest_hit(accel, ray)
+# Intersect an adapted acceleration structure - returns hit info, primitive, and
+# SurfaceInteraction. The primitive (triangle) contains material_type and
+# material_idx for dispatch. Every structure returns the hit triangle in world
+# space and the instance's custom index (`Raycore.closest_hit`), so the
+# interaction is built from the triangle as it is and carries that index.
+@propagate_inbounds function intersect!(accel::Raycore.AbstractAdaptedAccel, ray::AbstractRay)
+    hit_found, triangle, distance, bary_coords, instance_id = closest_hit(accel, ray)
 
     if !hit_found
         return false, triangle, SurfaceInteraction()
     end
 
-    # Convert to SurfaceInteraction (in local/BLAS space)
     interaction = triangle_to_surface_interaction(triangle, ray, bary_coords)
-
-    # Transform surface interaction to world space using the instance's transform.
-    # `inst_idx` is the 1-based position in `accel.instances` returned by closest_hit.
-    if inst_idx >= 1 && inst_idx <= length(accel.instances)
-        inst = accel.instances[inst_idx]
-        transform = inst.transform           # Mat3x4f = SMatrix{4,3,Float32} (Vulkan row-major 3×4 stored column-major)
-        inv_transform = inst.inv_transform   # Mat3x4f
-
-        # Affine point transform via Raycore helper — the previous `transform * Vec4f`
-        # was dimensionally wrong (4×3 × 4-vec) and bailed to a dynamic generic path
-        # on GPU, breaking compilation of `gpu_aux_buffer_kernel!`.
-        local_p = interaction.core.p
-        world_p = Raycore.transform_point(transform, local_p)
-
-        # Normal transform: (R^{-1})^T * n_local. inv_transform[i,j] for i,j ∈ 1:3
-        # already equals inv(R)^T after the row/col swap from the Vulkan layout, so
-        # the constructed 3×3 is the desired inverse-transpose.
-        local_n = Vec3f(interaction.core.n)
-        inv_t_3x3 = Mat3f(inv_transform[1,1], inv_transform[2,1], inv_transform[3,1],
-                          inv_transform[1,2], inv_transform[2,2], inv_transform[3,2],
-                          inv_transform[1,3], inv_transform[2,3], inv_transform[3,3])
-        world_n = Normal3f(normalize(inv_t_3x3 * local_n))
-
-        local_sn = Vec3f(interaction.shading.n)
-        world_sn = Normal3f(normalize(inv_t_3x3 * local_sn))
-
-        # Tangent/bitangent: direction transform R * v_local. Raycore.transform_direction
-        # handles the Mat3x4f layout correctly, where an inline
-        # `Mat3f(transform[…])` builds R^T and is wrong for non-orthogonal R.
-        world_dpdu = normalize(Raycore.transform_direction(transform, interaction.∂p∂u))
-        world_dpdv = normalize(Raycore.transform_direction(transform, interaction.∂p∂v))
-        world_st   = normalize(Raycore.transform_direction(transform, interaction.shading.∂p∂u))
-        world_sb   = normalize(Raycore.transform_direction(transform, interaction.shading.∂p∂v))
-
-        # Reconstruct SurfaceInteraction with world-space values
-        # Interaction fields: p, time, wo, n
-        core = Interaction(world_p, interaction.core.time, interaction.core.wo, world_n)
-        # ShadingInteraction fields: n, ∂p∂u, ∂p∂v, ∂n∂u, ∂n∂v
-        shading = ShadingInteraction(world_sn, world_st, world_sb, interaction.shading.∂n∂u, interaction.shading.∂n∂v)
-        # SurfaceInteraction constructor: core, shading, uv, ∂p∂u, ∂p∂v, ∂n∂u, ∂n∂v, ∂u∂x, ∂u∂y, ∂v∂x, ∂v∂y, ∂p∂x, ∂p∂y
-        interaction = SurfaceInteraction(
-            core, shading, interaction.uv,
-            world_dpdu, world_dpdv, interaction.∂n∂u, interaction.∂n∂v,
-            interaction.∂u∂x, interaction.∂u∂y, interaction.∂v∂x, interaction.∂v∂y,
-            interaction.∂p∂x, interaction.∂p∂y,
-            interaction.face_idx, interaction.bary, UInt32(inst_idx)
-        )
-    end
-
-    return true, triangle, interaction
+    return true, triangle, SurfaceInteraction(interaction; instance_id)
 end
 
