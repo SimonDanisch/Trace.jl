@@ -233,6 +233,7 @@ include("integrators/volpath/graph.jl")
 include("integrators/volpath/volpath.jl")
 # Hardware RT dispatch (uses Raycore's backend-agnostic HWTLAS/AdaptedAccel interface)
 include("integrators/volpath/hw-rt.jl")
+include("guides.jl")
 # RT pipeline (raygen+closesthit+miss via VkRayTracingPipelineKHR + SBT) variant
 include("integrators/volpath/rt-pipeline.jl")
 include("kernel-abstractions.jl")

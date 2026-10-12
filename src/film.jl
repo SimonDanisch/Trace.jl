@@ -218,14 +218,14 @@ function fill_aux_buffers!(film::Film, scene, camera; has_infinite_lights::Bool=
     kernel!(
         albedo, normal, depth,
         resolution, crop_bounds,
-        accel, camera, miss_depth;
+        accel, camera, miss_depth, Adapt.adapt(backend,scene.materials), Adapt.adapt(backend,scene.media_interfaces);
         ndrange = length(albedo)
     )
     Mantle.waitidle(mantle_device(backend))
     return film
 end
 
-@kernel inbounds=true function aux_buffer_kernel!(albedo, normal, depth, resolution, crop_bounds, accel, camera, miss_depth::Float32)
+@kernel inbounds=true function aux_buffer_kernel!(albedo, normal, depth, resolution, crop_bounds, accel, camera, miss_depth::Float32,materials,interfaces)
     idx = @index(Global)
 
     h, _ = size(albedo)
@@ -241,18 +241,8 @@ end
     ray, ω = generate_ray(camera, camera_sample)
 
      if ω > 0f0
-        hit, _primitive, si = intersect!(accel, ray)
-        if hit
-            normal[idx] = Vec3f(si.core.n)
-            cam_pos = ray.o
-            hit_pos = si.core.p
-            depth[idx] = sqrt(sum((hit_pos .- cam_pos) .^ 2))
-            albedo[idx] = RGB{Float32}(0.8f0, 0.8f0, 0.8f0)
-        else
-            normal[idx] = Vec3f(0f0, 0f0, 0f0)
-            depth[idx] = miss_depth
-            albedo[idx] = RGB{Float32}(0f0, 0f0, 0f0)
-        end
+        a,n,d=guide_hit(accel,materials,interfaces,ray,miss_depth)
+        albedo[idx]=a;normal[idx]=n;depth[idx]=d
     else
         normal[idx] = Vec3f(0f0, 0f0, 0f0)
         depth[idx] = Inf32

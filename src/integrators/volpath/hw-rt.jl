@@ -46,7 +46,7 @@ end
     @Const(camera), @Const(crop_p_min),
     @Const(miss_depth::Float32),
     @Const(width::Int32), @Const(height::Int32),
-    accel,
+    accel, materials, interfaces,
 )
     idx = @index(Global)
     if idx <= width * height
@@ -62,18 +62,8 @@ end
         cs = CameraSample(pixel, Point2f(0.5f0, 0.5f0), 0f0)
         ray, w = generate_ray(camera, cs)
         if w > 0f0
-            hit, prim, t, bary, _icx = Raycore.closest_hit(accel, ray)
-            if hit
-                depth[idx] = t
-                # The denoiser's normal edge-stop reads this. A constant here
-                # blurred across every silhouette that has no depth jump.
-                normal[idx] = vp_compute_shading_normal(prim, bary, vp_compute_geometric_normal(prim))
-                albedo[idx] = RGB{Float32}(0.8f0, 0.8f0, 0.8f0)
-            else
-                depth[idx] = miss_depth
-                normal[idx] = Vec3f(0f0, 0f0, 0f0)
-                albedo[idx] = RGB{Float32}(0f0, 0f0, 0f0)
-            end
+            a,n,d=guide_hit(accel,materials,interfaces,ray,miss_depth)
+            depth[idx]=d; normal[idx]=n; albedo[idx]=a
         else
             depth[idx] = miss_depth
             normal[idx] = Vec3f(0f0, 0f0, 0f0)
@@ -100,7 +90,7 @@ function fill_aux_buffers!(film::Film, scene::Scene{<:AdaptedAccel}, camera;
         film.depth, film.normal, film.albedo,
         camera, film.crop_bounds.p_min,
         miss_depth, Int32(w), Int32(h),
-        accel; ndrange=n)
+        accel,scene.materials,scene.media_interfaces; ndrange=n)
     Mantle.waitidle(mantle_device(backend))
     return film
 end
