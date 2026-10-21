@@ -134,15 +134,31 @@ significantly reducing null scattering events in sparse heterogeneous media.
     template_grid::MajorantGrid
 )
     # Create iterator using template grid for type consistency across all media
-    iter = create_majorant_iterator(medium, table, ray, t_max, λ, template_grid)
+    step_limit = medium_step_limit(medium, ray.o, ray.d)
+    iter = create_majorant_iterator(medium, table, ray, min(t_max, step_limit), λ, template_grid)
 
     # Call type-stable iteration (dispatches on iter type)
-    return sample_T_maj_loop!(
+    result = sample_T_maj_loop!(
         iter, T_maj_accum, beta, r_u, r_l, rng_state,
         scatter_queue,
         pixel_L,
         work, media, medium_idx, table, max_depth
     )
+    # An empty majorant iterator still spans vacuum along a curved path.
+    # Advance it, otherwise a capped continuation retraces the same origin
+    # forever when its step lies outside the density grid.
+    if isfinite(step_limit) && !result.done && result.ray_o == ray.o
+        distance = min(t_max, step_limit)
+        endpoint = Point3f(ray.o + distance * ray.d)
+        direction = medium_end_direction(medium, endpoint, ray.d, step_limit, distance)
+        result = SampleTMajResult(result.beta, result.r_u, result.r_l,
+            result.rng_state, false, direction, endpoint, result.retrace)
+    end
+    if !result.done && step_limit < t_max
+        return SampleTMajResult(result.beta, result.r_u, result.r_l, result.rng_state,
+                                false, result.ray_d, result.ray_o, true)
+    end
+    return result
 end
 
 @propagate_inbounds function sample_medium_interaction!(
@@ -204,6 +220,20 @@ end
         return
     end
 
+    # A bent ray cannot reuse a hit computed before the bend. Re-enter the
+    # existing intersection queue from its actual position, without counting
+    # transport subdivisions as scattering/BSDF bounces.
+    if result.retrace
+        if !is_black(beta) && !is_black(r_u)
+            ray = Raycore.Ray(o=result.ray_o, d=ray_d, t_max=Inf32, time=work.ray.time)
+            push!(next_ray_queue, VPRayWorkItem(
+                ray, work.depth, work.lambda, work.pixel_index, beta, r_u, r_l,
+                work.prev_intr_p, work.prev_intr_n, work.eta_scale,
+                work.specular_bounce, work.any_non_specular_bounces, work.medium_idx))
+        end
+        return
+    end
+
     # Ray survived to t_max - process what's at the end
     if is_black(beta) || is_black(r_u) || work.depth >= max_depth
         return
@@ -225,7 +255,7 @@ end
         # site (not inside the shading kernel), so the typed queue picks
         # the concrete material type.  Mirrors the non-medium path in
         # `vp_trace_and_shade_kernel!`.
-        wo = -work.ray.d
+        wo = -ray_d
         resolved_mat_idx = resolve_mix_material(
             materials, work.hit_material_idx, work.hit_pi, wo,
             TextureFilterContext(work.hit_uv, work.hit_face_idx, work.hit_bary),
@@ -261,8 +291,10 @@ end
         # Bump-perturbed shading frame is kept as computed in
         # `vp_trace_and_shade_kernel!` (using the unresolved material's bump
         # map) — same behaviour as before the per-material split.
+        incoming_ray = Raycore.Ray(o=work.ray.o, d=ray_d,
+                                  t_max=work.ray.t_max, time=work.ray.time)
         hit_work = VPHitSurfaceWorkItem(
-            work.ray,
+            incoming_ray,
             work.hit_pi, work.hit_ps, work.hit_n, work.hit_dpdu, work.hit_dpdv,
             work.hit_ns, work.hit_dpdus, work.hit_dpdvs,
             work.hit_uv, resolved_mat_idx, work.hit_interface,
@@ -289,7 +321,13 @@ struct SampleTMajResult
     rng_state::UInt64  # Updated RNG state for continuation
     done::Bool  # true if terminated (absorption/scatter), false if reached end
     ray_d::Vec3f    # Deflected ray direction (for gravitational lensing)
+    ray_o::Point3f  # Actual endpoint for transport continuations
+    retrace::Bool  # Must recompute geometry rather than reuse work's stored hit
 end
+
+# Existing straight-medium returns do not need a continuation position.
+SampleTMajResult(beta, r_u, r_l, rng, done, ray_d) =
+    SampleTMajResult(beta, r_u, r_l, rng, done, ray_d, Point3f(0), false)
 
 """
     sample_T_maj_loop!(iter::RayMajorantIterator, ...) -> SampleTMajResult
@@ -319,6 +357,7 @@ Uses deterministic LCG RNG for medium sampling (pbrt-v4 pattern).
 
     # Ray state for deflection (mutable during tracking)
     ray_d = work.ray.d
+    ray_o = work.ray.o
 
     current_iter = iter
     current_rng = rng_state
@@ -339,7 +378,7 @@ Uses deterministic LCG RNG for medium sampling (pbrt-v4 pattern).
             ray_d
         )
 
-        if result.done
+        if result.done || result.retrace
             # Terminated (absorption or scatter)
             return result
         end
@@ -350,11 +389,12 @@ Uses deterministic LCG RNG for medium sampling (pbrt-v4 pattern).
         r_l = result.r_l
         current_rng = result.rng_state
         ray_d = result.ray_d
+        ray_o = result.ray_o
         # T_maj_accum is reset to 1.0 inside sample_segment! after interactions
         T_maj_accum = SpectralRadiance(1f0)
     end
 
-    return SampleTMajResult(beta, r_u, r_l, current_rng, false, ray_d)
+    return SampleTMajResult(beta, r_u, r_l, current_rng, false, ray_d, ray_o, false)
 end
 
 """
@@ -382,12 +422,18 @@ Uses deterministic LCG RNG for medium sampling (pbrt-v4 pattern).
 )
     σ_maj = seg.σ_maj
     σ_maj_0 = σ_maj[1]
+    planned_step = Raycore.with_index(medium_step_limit, media, medium_idx, work.ray.o, ray_d)
+    curved = planned_step < Inf32
 
     # Handle zero-majorant segment (empty voxel)
     if σ_maj_0 < 1f-10
         # Just apply transmittance for this segment (which is 1.0 for zero extinction)
         # No need to sample - ray passes through
-        return SampleTMajResult(beta, r_u, r_l, rng_state, false, ray_d)
+        curved || return SampleTMajResult(beta, r_u, r_l, rng_state, false, ray_d)
+        endpoint = Point3f(work.ray.o + ray_d * seg.t_max)
+        direction = Raycore.with_index(medium_end_direction, media, medium_idx,
+                                       endpoint, ray_d, planned_step, seg.t_max)
+        return SampleTMajResult(beta, r_u, r_l, rng_state, false, direction, endpoint, false)
     end
 
     t = seg.t_min
@@ -421,7 +467,10 @@ Uses deterministic LCG RNG for medium sampling (pbrt-v4 pattern).
                 r_l = r_l * T_maj / T_maj_0
             end
             # Continue to next segment
-            return SampleTMajResult(beta, r_u, r_l, current_rng, false, ray_d)
+            endpoint = Point3f(ray_o + ray_d * dt_remain)
+            direction = curved ? Raycore.with_index(medium_end_direction, media, medium_idx,
+                                                    endpoint, ray_d, planned_step, seg.t_max) : ray_d
+            return SampleTMajResult(beta, r_u, r_l, current_rng, false, direction, endpoint, false)
         end
 
         # Compute transmittance for this step
@@ -429,7 +478,9 @@ Uses deterministic LCG RNG for medium sampling (pbrt-v4 pattern).
 
         # Sample medium properties at interaction point (incremental position)
         p = Point3f(ray_o + ray_d * dt)
-        mp = Raycore.with_index(sample_point, media, medium_idx, media, rgb2spec_table, p, work.lambda)
+        local_d = Raycore.with_index(medium_point_direction, media, medium_idx,
+                                    p, ray_d, planned_step, t_sample)
+        mp = Raycore.with_index(sample_point, media, medium_idx, media, rgb2spec_table, p, work.lambda, local_d)
 
         # Add emission if present
         if !is_black(mp.Le) && work.depth < max_depth
@@ -470,7 +521,7 @@ Uses deterministic LCG RNG for medium sampling (pbrt-v4 pattern).
             # Push to scatter queue (use deflected direction)
             scatter_item = VPMediumScatterWorkItem(
                 p,
-                -ray_d,  # wo points back toward camera (use deflected direction)
+                -local_d,  # physical direction at the scattering vertex
                 work.ray.time,
                 work.lambda,
                 work.pixel_index,
@@ -500,9 +551,15 @@ Uses deterministic LCG RNG for medium sampling (pbrt-v4 pattern).
             end
 
             t = t_sample
-            # Advance ray origin to interaction point and apply deflection
+            # A null collision is an emission/extinction SAMPLE, not a bend
+            # or a new geometry segment. Keep sampling the same bounded chord
+            # and bend once at its end. Retracing at every null event made
+            # geodesics depend on the random majorant samples and paid another
+            # complete wavefront round for each sample in empty space.
             ray_o = p
-            ray_d = Raycore.with_index(apply_deflection, media, medium_idx, p, ray_d, dt)
+            if !curved
+                ray_d = Raycore.with_index(apply_deflection, media, medium_idx, p, ray_d, dt)
+            end
 
             # Check throughput
             if is_black(beta) || is_black(r_u)
@@ -514,4 +571,3 @@ Uses deterministic LCG RNG for medium sampling (pbrt-v4 pattern).
     # Exceeded max samples within segment
     return SampleTMajResult(beta, r_u, r_l, current_rng, false, ray_d)
 end
-

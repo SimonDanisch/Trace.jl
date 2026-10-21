@@ -2064,3 +2064,26 @@ end
 # Default: no deflection. Media that bend light (e.g. SpacetimeMedium)
 # should override this method.
 @propagate_inbounds apply_deflection(medium, p::Point3f, ray_d::Vec3f, dt::Float32) = ray_d
+
+"""Maximum straight transport segment before re-intersecting a curved ray.
+
+Ordinary media return infinity and keep the existing delta-tracking fast path.
+Deflecting media provide a finite, geometry-scale-dependent step length.
+"""
+@propagate_inbounds medium_step_limit(medium, p::Point3f, ray_d::Vec3f) = Inf32
+
+# Curved transport may use a staggered direction: prepare the chord BEFORE
+# intersecting geometry, then recover the physical direction at each sample
+# and endpoint. Ordinary media keep the original direction and fast path.
+@propagate_inbounds medium_start_direction(medium, p, d, step) = d
+@propagate_inbounds medium_point_direction(medium, p, d, step, traveled) = d
+@propagate_inbounds medium_end_direction(medium, p, d, step, traveled) =
+    apply_deflection(medium, p, d, traveled)
+
+"""Directional medium query; the fallback preserves existing medium methods.
+
+`ray_d` is the current backwards-traced propagation direction at `p`.
+Moving emitters can specialize this method for their frequency/angle response.
+"""
+@propagate_inbounds sample_point(medium, media, table, p::Point3f, λ::Wavelengths, ray_d::Vec3f) =
+    sample_point(medium, media, table, p, λ)
