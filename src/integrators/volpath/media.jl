@@ -1212,51 +1212,43 @@ end
 # Template grid extraction for RGBGridMedium
 @inline get_template_grid(medium::RGBGridMedium) = medium.majorant_grid
 
-# After BOTH grid media: the generators below name `RGBGridMedium`, and under
-# Julia 1.12's binding rules a generator defined before the type cannot see it —
-# inference of every call then failed with an `UndefVarError`, which broke every
-# scene with a medium.
 """
-    get_template_grid_from_tuple(media::Tuple) -> MajorantGrid
+    has_majorant_grid(::Type{<:Medium}) -> Val{Bool}
 
-Extract a template grid from the first GridMedium or RGBGridMedium in the tuple, or EmptyMajorantGrid() if none.
-This is used to ensure all majorant iterators have consistent types for GPU compilation.
+Whether a medium's majorant iterator walks a grid of its own, answered for the
+type: the grid of the first such medium in a scene is the template every
+majorant iterator of the scene takes its type from. A medium defined outside
+Hikari that brings a grid adds `Val(true)` for its type beside its
+`get_template_grid`.
 """
-@generated function get_template_grid_from_tuple(media::M) where {M <: Tuple}
-    N = length(M.parameters)
+has_majorant_grid(::Type) = Val(false)
+has_majorant_grid(::Type{<:GridMedium}) = Val(true)
+has_majorant_grid(::Type{<:RGBGridMedium}) = Val(true)
 
-    # Find first GridMedium or RGBGridMedium in the tuple
-    for i in 1:N
-        T = M.parameters[i]
-        if T <: GridMedium || T <: RGBGridMedium
-            return :(@inbounds get_template_grid(media[$i]))
-        end
-    end
+"""
+    get_template_grid_from_tuple(media) -> MajorantGrid
 
-    # No GridMedium/RGBGridMedium found - return empty grid (all homogeneous)
-    # Use function call instead of global const to be GPU-compatible
-    return :(EmptyMajorantGrid())
-end
-
-# Single medium case
+The grid of the first medium that has one (see [`has_majorant_grid`](@ref)), or
+`EmptyMajorantGrid()` when every medium is homogeneous. Every majorant iterator
+of a scene is built with this grid's type, so the kernels see one iterator type.
+A dispatch walk rather than a generator: a generator cannot see a method a
+package defines after Hikari, which is where a custom medium's answer lives.
+"""
+@inline get_template_grid_from_tuple(media::Tuple) = first_template(media)
 @inline get_template_grid_from_tuple(medium::Medium) = get_template_grid(medium)
+@inline get_template_grid_from_tuple(media::Raycore.StaticMultiTypeSet) = first_slot_template(media.data)
 
-# StaticMultiTypeSet case - inspect element types of data arrays
-@generated function get_template_grid_from_tuple(media::Raycore.StaticMultiTypeSet{Data, Textures}) where {Data<:Tuple, Textures}
-    N = length(Data.parameters)
+@inline first_template(::Tuple{}) = EmptyMajorantGrid()
+@inline first_template(media::Tuple) = first_template(has_majorant_grid(typeof(first(media))), media)
+@inline first_template(::Val{true}, media::Tuple) = get_template_grid(first(media))
+@inline first_template(::Val{false}, media::Tuple) = first_template(Base.tail(media))
 
-    # Find first array whose element type is GridMedium or RGBGridMedium
-    for i in 1:N
-        ArrayT = Data.parameters[i]
-        ElemT = eltype(ArrayT)
-        if ElemT <: GridMedium || ElemT <: RGBGridMedium
-            return :(@inbounds get_template_grid(media.data[$i][1]))
-        end
-    end
-
-    # No GridMedium/RGBGridMedium found - return empty grid
-    return :(EmptyMajorantGrid())
-end
+# A StaticMultiTypeSet holds one array per medium type: the first slot whose
+# element type has a grid answers with its first element's.
+@inline first_slot_template(::Tuple{}) = EmptyMajorantGrid()
+@inline first_slot_template(slots::Tuple) = first_slot_template(has_majorant_grid(eltype(first(slots))), slots)
+@inline first_slot_template(::Val{true}, slots::Tuple) = @inbounds get_template_grid(first(slots)[1])
+@inline first_slot_template(::Val{false}, slots::Tuple) = first_slot_template(Base.tail(slots))
 
 # Following pbrt-v4: bool IsEmissive() const { return LeGrid && LeScale > 0; }
 @propagate_inbounds is_emissive(medium::RGBGridMedium) = !isnothing(medium.Le_grid) && medium.Le_scale > 0f0
